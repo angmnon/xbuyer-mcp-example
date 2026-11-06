@@ -1,7 +1,7 @@
 {
   "name": "xbuyer-mcp-example",
-  "version": "1.0.0",
-  "description": "Minimal, runnable MCP server that exposes XBuyer's Agent API (search/compare/cart/checkout/refund) to any AI agent — gated by the user's wallet and per-scope OAuth authorization.",
+  "version": "0.2.0",
+  "description": "Minimal, runnable MCP server that exposes VNMade's Agent API (search/compare/cart/checkout/refund) to any AI agent — gated by the user's wallet and per-scope OAuth authorization. v2: vnmade_* tools with xbuyer_* legacy aliases.",
   "type": "module",
   "private": false,
   "license": "MIT",

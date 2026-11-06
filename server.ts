@@ -1,32 +1,40 @@
 /**
- * XBuyer MCP Server — example
+ * VNMade MCP Server — example (v2)
  * ----------------------------------------------------------------------------
- * Minimal, runnable MCP server that exposes XBuyer's Agent API as MCP tools.
+ * Minimal, runnable MCP server that exposes VNMade's Agent API as MCP tools.
  * An AI assistant (Claude, Cursor, a custom agent, ...) can call these tools to
- * SEARCH / COMPARE / CART / CHECKOUT / REFUND on XBuyer — all gated by the
+ * SEARCH / COMPARE / CART / CHECKOUT / REFUND on VNMade — all gated by the
  * user's wallet balance and per-scope OAuth authorization.
  *
  * This is the DevRel hook described in the marketing playbook (W2 / 2.3).
  * It is intentionally tiny so a developer can read it in 5 minutes.
  *
  * Run (after `npm i @modelcontextprotocol/sdk`):
- *   XBUYER_API_KEY=xxx npx tsx server.ts
+ *   XVNMADE_API_KEY=xxx npx tsx server.ts
  * Wire into Claude Desktop / any MCP client via stdio.
+ *
+ * v2 migration note (2026-11-07): tools are registered under BOTH the new
+ * `vnmade_*` names (preferred) and the legacy `xbuyer_*` names (deprecated
+ * aliases). Existing clients using `xbuyer_*` keep working unchanged. The
+ * legacy names will be removed in a future major version.
  * ----------------------------------------------------------------------------
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const API_BASE = process.env.XBUYER_API_BASE ?? "https://xbuyer.com/api/agent";
-const API_KEY = process.env.XBUYER_API_KEY;
+const API_BASE =
+  process.env.XVNMADE_API_BASE ??
+  process.env.XBUYER_API_BASE ??
+  "https://vnmade.xbuyer.com/api/agent";
+const API_KEY = process.env.XVNMADE_API_KEY ?? process.env.XBUYER_API_KEY;
 
 if (!API_KEY) {
-  console.error("XBUYER_API_KEY is required");
+  console.error("XVNMADE_API_KEY is required (XBUYER_API_KEY also accepted as legacy fallback)");
   process.exit(1);
 }
 
-async function xbuyer(path: string, body?: unknown) {
+async function agentApi(path: string, body?: unknown) {
   const res = await fetch(`${API_BASE}${path}`, {
     method: body ? "POST" : "GET",
     headers: {
@@ -38,73 +46,99 @@ async function xbuyer(path: string, body?: unknown) {
   if (!res.ok) {
     // Surface a safe error — never leak wallet internals beyond what API returns.
     const msg = await res.text();
-    throw new Error(`XBuyer API ${res.status}: ${msg.slice(0, 200)}`);
+    throw new Error(`VNMade API ${res.status}: ${msg.slice(0, 200)}`);
   }
   return res.json();
 }
 
 const server = new McpServer({
-  name: "xbuyer",
-  version: "0.1.0",
+  name: "vnmade",
+  version: "0.2.0",
 });
 
+/**
+ * Registers one agent tool under BOTH the v2 name (`vnmade_<base>`, preferred)
+ * and the legacy alias (`xbuyer_<base>`, deprecated). Both names invoke the
+ * same handler, so existing `xbuyer_*` clients keep working unchanged until the
+ * legacy aliases are removed in a future major version.
+ */
+function registerAgentTool(
+  base: string,
+  description: string,
+  schema: Record<string, z.ZodTypeAny>,
+  handler: (args: Record<string, unknown>) => Promise<{ content: { type: "text"; text: string }[] }>,
+) {
+  server.tool(`vnmade_${base}`, description, schema, handler as never);
+  server.tool(
+    `xbuyer_${base}`,
+    `[DEPRECATED alias of vnmade_${base}] ${description}`,
+    schema,
+    handler as never,
+  );
+}
+
 // 1) SEARCH — find products by natural-language need + budget
-server.tool(
-  "xbuyer_search",
-  "Search XBuyer products by a need and an optional budget. Returns candidates with prices.",
+registerAgentTool(
+  "search",
+  "Search VNMade products by a need and an optional budget. Returns candidates with prices.",
   { query: z.string(), budgetUsd: z.number().optional(), limit: z.number().default(10) },
   async ({ query, budgetUsd, limit }) =>
-    xbuyer("/search", { query, budgetUsd, limit }).then((r) => ({
+    agentApi("/search", { query, budgetUsd, limit }).then((r) => ({
       content: [{ type: "text", text: JSON.stringify(r, null, 2) }],
-    }))
+    })),
 );
 
 // 2) COMPARE — get a TOP-N shortlist with reasons
-server.tool(
-  "xbuyer_compare",
+registerAgentTool(
+  "compare",
   "Compare candidates and return a TOP-N shortlist with reasons. Does NOT spend anything.",
   { query: z.string(), budgetUsd: z.number().optional(), topN: z.number().default(10) },
   async ({ query, budgetUsd, topN }) =>
-    xbuyer("/compare", { query, budgetUsd, topN }).then((r) => ({
+    agentApi("/compare", { query, budgetUsd, topN }).then((r) => ({
       content: [{ type: "text", text: JSON.stringify(r, null, 2) }],
-    }))
+    })),
 );
 
 // 3) CART — stage a product (still no charge)
-server.tool(
-  "xbuyer_cart_add",
+registerAgentTool(
+  "cart_add",
   "Add a product to the agent cart. No charge until checkout is authorized.",
   { productId: z.string(), qty: z.number().default(1) },
   async ({ productId, qty }) =>
-    xbuyer("/cart", { productId, qty }).then((r) => ({
+    agentApi("/cart", { productId, qty }).then((r) => ({
       content: [{ type: "text", text: JSON.stringify(r, null, 2) }],
-    }))
+    })),
 );
 
 // 4) CHECKOUT — the ONLY tool that can spend, and only within wallet + authorization
-server.tool(
-  "xbuyer_checkout",
+registerAgentTool(
+  "checkout",
   "Checkout the cart. Charges ONLY the pre-funded wallet, within the user's per-scope authorization and daily limits. Fails closed if not authorized.",
   { confirm: z.boolean().describe("Must be true; requires prior user authorization") },
   async ({ confirm }) => {
-    if (!confirm) return { content: [{ type: "text", text: "Checkout requires explicit confirm=true and user authorization." }] };
-    return xbuyer("/checkout", { confirm }).then((r) => ({
+    if (!confirm)
+      return {
+        content: [
+          { type: "text", text: "Checkout requires explicit confirm=true and user authorization." },
+        ],
+      };
+    return agentApi("/checkout", { confirm }).then((r) => ({
       content: [{ type: "text", text: JSON.stringify(r, null, 2) }],
     }));
-  }
+  },
 );
 
 // 5) REFUND — governed refund within policy
-server.tool(
-  "xbuyer_refund",
-  "Request a refund for an order within XBuyer's return policy. Gated by policy + authorization.",
+registerAgentTool(
+  "refund",
+  "Request a refund for an order within VNMade's return policy. Gated by policy + authorization.",
   { orderId: z.string(), reason: z.string().optional() },
   async ({ orderId, reason }) =>
-    xbuyer("/refund", { orderId, reason }).then((r) => ({
+    agentApi("/refund", { orderId, reason }).then((r) => ({
       content: [{ type: "text", text: JSON.stringify(r, null, 2) }],
-    }))
+    })),
 );
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error("XBuyer MCP server running on stdio");
+console.error("VNMade MCP server (v2) running on stdio");
